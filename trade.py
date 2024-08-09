@@ -11,6 +11,7 @@ from binance.client import Client as bnc
 import ccxt
 import cbpro
 import pandas as pd
+import numpy as np
 
 
 # write output to file
@@ -27,6 +28,7 @@ def syncWallets():
         bnc_assets = set(symbol['baseAsset'] for symbol in bnc_nfo['symbols'])
     except Exception as e:
         output(f"{e}\n\n")   
+        return None
     output(f"{bnc_assets}\n{len(bnc_assets)} Binance\n\n")
 
     # coinbase
@@ -36,17 +38,14 @@ def syncWallets():
     except Exception as e:
         output(f"{e}\n\n")
     output(f"{cbc_assets}\n{len(cbc_assets)} Coinbase\n\n")
-
-    # shared
-    shared = bnc_assets & cbc_assets
-    output(f"{shared}\n{len(shared)} Shared\n\n")
     
-    # invalid
+    # invalid includes stable and delisted
+    shared = bnc_assets & cbc_assets
     invalid = {"REP", "CELO", "USDC", "DAI", "USDT", "AMP", "WBTC", "JASMY", "HNT", "SPELL"}
-    output(f"{invalid}\n{len(invalid)} Invalid\n\n")
-
-    # valid
     valid = shared - invalid
+    
+    output(f"{shared}\n{len(shared)} Shared\n\n")
+    output(f"{invalid}\n{len(invalid)} Invalid\n\n")
     output(f"{valid}\n{len(valid)} Valid\n\n")
     return valid
 
@@ -69,7 +68,7 @@ def getPrice(asset):
 start_time = time.time()
 wire_path = "/home/dev/code/tmp/" + str(datetime.now().strftime("%Y-%m-%d %H-%M-%S")) + ".txt"
 cbp = cbpro.PublicClient()
-bnc = bnc(os.getenv("BINANCE_API_KEY"), os.getenv("BINANCE_API_SECRET"), tld="us")
+bnc = bnc(os.getenv("BINANCE_API_KEY"), os.getenv("BINANCE_API_SECRET"), tld = "us")
 cbc = ccxt.coinbase({'apiKey': os.getenv("COINBASE_API_KEY"), 'secret': os.getenv("COINBASE_API_SECRET")})
 pd.set_option('display.max_columns', None)
 
@@ -80,13 +79,21 @@ valid = syncWallets()
 for asset in valid:
     try:    
         # fetch kline data
-        klines = bnc.get_klines(symbol = asset + "USDT", interval = bnc.KLINE_INTERVAL_30MINUTE, limit = 2000)
-        df = pd.DataFrame(klines, columns=['Open Time', 'Open', 'High', 'Low', 'Close', 'Volume', 'Close Time', 'Quote Asset Volume', 'Number of Trades', 'Taker Buy Base Asset Volume', 'Taker Buy Quote Asset Volume', 'Ignore'])
+        klines = bnc.get_klines(symbol = asset + "USDT", interval = bnc.KLINE_INTERVAL_30MINUTE, limit = 1000)
+        df = pd.DataFrame(klines, columns = ['Open Time', 'Open', 'High', 'Low', 'Close', 'Volume', 'Close Time', 'Quote Asset Volume', 'Number of Trades', 'Taker Buy Base Asset Volume', 'Taker Buy Quote Asset Volume', 'Ignore'])
+        df = df.rename(columns = {'Close Time': 'ds', 'Number of Trades': 'Trades'})
+        df['ds'] = pd.to_datetime(df['ds'], unit = 'ms')
+        
+        # convert multiple columns to float64
+        df = df.astype({'Open': 'float64', 'High': 'float64', 'Low': 'float64', 'Close': 'float64', 'Volume': 'float64'})
 
-        # convert timestamps to a readable date format
-        df['Open Time'] = pd.to_datetime(df['Open Time'], unit='ms')
-        df['Close Time'] = pd.to_datetime(df['Close Time'], unit='ms')
-        output(f"{asset}\n{df}\n\n")
+        # log of one plus percentage change is the target variable
+        df['y'] = np.log(1 + df['Close'].pct_change())
+             
+        # remove redundant columns
+        df = df[['ds', 'y', 'Open', 'High', 'Low', 'Close', 'Volume', 'Trades']]
+   
+        output(f"{asset}\n{df}\n{df.dtypes}\n\n")
     except Exception as e:
         output(f"{asset} Error {e}\n")
 
