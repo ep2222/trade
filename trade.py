@@ -10,6 +10,7 @@ from datetime import datetime
 from binance.client import Client as bnc
 import ccxt
 import cbpro
+import pandas as pd
 
 
 # write output to file
@@ -22,8 +23,7 @@ def output(message):
 def syncWallets():
     # binance
     try:
-        bnc_api = bnc(os.getenv("BINANCE_API_KEY"), os.getenv("BINANCE_API_SECRET"), tld="us")
-        bnc_nfo = bnc_api.get_exchange_info()
+        bnc_nfo = bnc.get_exchange_info()
         bnc_assets = set(symbol['baseAsset'] for symbol in bnc_nfo['symbols'])
     except Exception as e:
         output(f"{e}\n\n")   
@@ -31,7 +31,6 @@ def syncWallets():
 
     # coinbase
     try:
-        cbc = ccxt.coinbase({'apiKey': os.getenv("COINBASE_API_KEY"), 'secret': os.getenv("COINBASE_API_SECRET")})
         cbc_nfo = cbc.fetch_currencies()
         cbc_assets = set(cbc_nfo.keys())
     except Exception as e:
@@ -39,11 +38,11 @@ def syncWallets():
     output(f"{cbc_assets}\n{len(cbc_assets)} Coinbase\n\n")
 
     # shared
-    shared = bnc_assets.intersection(cbc_assets)
+    shared = bnc_assets & cbc_assets
     output(f"{shared}\n{len(shared)} Shared\n\n")
     
     # invalid
-    invalid = {"REP", "CELO", "USDC", "DAI", "USDT"}
+    invalid = {"REP", "CELO", "USDC", "DAI", "USDT", "AMP", "WBTC", "JASMY", "HNT", "SPELL"}
     output(f"{invalid}\n{len(invalid)} Invalid\n\n")
 
     # valid
@@ -62,21 +61,45 @@ def getPrice(asset):
         return None
 
 
-# track runtime
+##################
+## BEGIN SCRIPT ##
+##################
+
+# track runtime and variables
 start_time = time.time()
 wire_path = "/home/dev/code/tmp/" + str(datetime.now().strftime("%Y-%m-%d %H-%M-%S")) + ".txt"
 cbp = cbpro.PublicClient()
+bnc = bnc(os.getenv("BINANCE_API_KEY"), os.getenv("BINANCE_API_SECRET"), tld="us")
+cbc = ccxt.coinbase({'apiKey': os.getenv("COINBASE_API_KEY"), 'secret': os.getenv("COINBASE_API_SECRET")})
+pd.set_option('display.max_columns', None)
 
-# void main
-shared = syncWallets()
+# main
+valid = syncWallets()
+
+# candlestick dataframes
+for asset in valid:
+    try:    
+        # fetch kline data
+        klines = bnc.get_klines(symbol = asset + "USDT", interval = bnc.KLINE_INTERVAL_30MINUTE, limit = 2000)
+        df = pd.DataFrame(klines, columns=['Open Time', 'Open', 'High', 'Low', 'Close', 'Volume', 'Close Time', 'Quote Asset Volume', 'Number of Trades', 'Taker Buy Base Asset Volume', 'Taker Buy Quote Asset Volume', 'Ignore'])
+
+        # convert timestamps to a readable date format
+        df['Open Time'] = pd.to_datetime(df['Open Time'], unit='ms')
+        df['Close Time'] = pd.to_datetime(df['Close Time'], unit='ms')
+        output(f"{asset}\n{df}\n\n")
+    except Exception as e:
+        output(f"{asset} Error {e}\n")
 
 # capture prices at time of trade
-prices = dict()
-for asset in shared:
-    price = getPrice(asset)
-    if price:
-        prices[asset] = price
-output(f"{prices}\n{len(prices)} Prices\n\n")
+trade_prices = dict()
+for asset in valid:
+    try:
+        price = getPrice(asset)
+        if price:
+            trade_prices[asset] = price
+    except Exception as e:
+        output(f"{asset} Error {e}\n")
+output(f"{trade_prices}\n{len(trade_prices)} Prices\n\n")
 
 # calculate runtime
 end_time = time.time()
