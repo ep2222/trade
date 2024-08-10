@@ -5,6 +5,7 @@ collections.Mapping = abc.Mapping
 collections.Sequence = abc.Sequence
 collections.Callable = abc.Callable
 import os
+import sys
 import time
 from datetime import datetime
 from binance.client import Client as bnc
@@ -21,92 +22,119 @@ def output(message):
 
 
 # find common assets between binance and coinbase api keys
-def syncWallets():
-    # binance
+def sync_wallets():
     try:
+        # binance
         bnc_nfo = bnc.get_exchange_info()
         bnc_assets = set(symbol['baseAsset'] for symbol in bnc_nfo['symbols'])
-    except Exception as e:
-        output(f"{e}\n\n")   
-        return None
-    output(f"{bnc_assets}\n{len(bnc_assets)} Binance\n\n")
+        output(f"{bnc_assets}\n{len(bnc_assets)} Binance\n\n")
 
-    # coinbase
-    try:
+        # coinbase
         cbc_nfo = cbc.fetch_currencies()
         cbc_assets = set(cbc_nfo.keys())
+        output(f"{cbc_assets}\n{len(cbc_assets)} Coinbase\n\n")
+        
+        # invalid includes stable and delisted
+        shared = bnc_assets & cbc_assets
+        invalid = {"REP", "CELO", "USDC", "DAI", "USDT", "AMP", "WBTC", "JASMY", "HNT", "SPELL"}
+        sw_valid = shared - invalid
+        
+        output(f"{shared}\n{len(shared)} Shared\n\n")
+        output(f"{invalid}\n{len(invalid)} Invalid\n\n")
+        output(f"{sw_valid}\n{len(sw_valid)} Valid\n\n")
+        return sw_valid
     except Exception as e:
-        output(f"{e}\n\n")
-    output(f"{cbc_assets}\n{len(cbc_assets)} Coinbase\n\n")
-    
-    # invalid includes stable and delisted
-    shared = bnc_assets & cbc_assets
-    invalid = {"REP", "CELO", "USDC", "DAI", "USDT", "AMP", "WBTC", "JASMY", "HNT", "SPELL"}
-    valid = shared - invalid
-    
-    output(f"{shared}\n{len(shared)} Shared\n\n")
-    output(f"{invalid}\n{len(invalid)} Invalid\n\n")
-    output(f"{valid}\n{len(valid)} Valid\n\n")
-    return valid
+        output(f"sync_wallets() Error {e}\n\n")
+        return None
+
+
+# get candlestick dataframes
+def get_data(gd_valid):
+    gd_data = dict()   # asset: df
+    try:
+        for asset in gd_valid:
+            current_asset = asset
+
+            # fetch kline data
+            klines = bnc.get_klines(symbol = asset + "USDT", interval = bnc.KLINE_INTERVAL_30MINUTE, limit = 1000)
+            df = pd.DataFrame(klines, columns = ['Open Time', 'Open', 'High', 'Low', 'Close', 'Volume', 'Close Time', 'Quote Asset Volume', 'Number of Trades', 'Taker Buy Base Asset Volume', 'Taker Buy Quote Asset Volume', 'Ignore'])
+            df = df.rename(columns = {'Close Time': 'ds', 'Number of Trades': 'Trades'})
+            df['ds'] = pd.to_datetime(df['ds'], unit = 'ms')
+            
+            # convert multiple ohlcv to float64
+            df = df.astype({'Open': 'float64', 'High': 'float64', 'Low': 'float64', 'Close': 'float64', 'Volume': 'float64'})
+
+            # log of one plus percentage change is the target variable
+            df['y'] = np.log(1 + df['Close'].pct_change())
+                 
+            # remove redundant columns
+            df = df[['ds', 'y', 'Open', 'High', 'Low', 'Close', 'Volume', 'Trades']]
+            
+            gd_data[asset] = df
+            output(f"{asset}\n{df}\n{df.dtypes}\n\n")
+        return gd_data
+    except Exception as e:
+        output(f"get_data() {current_asset} Error {e}\n\n")
+        return None
 
 
 # get spot price
-def getPrice(asset): 
+def get_price(gp_asset): 
     try:
-        ticker = cbp.get_product_ticker(product_id = asset + "-USD")
+        ticker = cbp.get_product_ticker(product_id = gp_asset + "-USD")
         return float(ticker['price'])
     except Exception as e:  
-        output(f"{asset} Error {e}\n")
+        output(f"get_price() {gp_asset} Error {e}\n")
         return None
 
 
-##################
-## BEGIN SCRIPT ##
-##################
-
-# track runtime and variables
-start_time = time.time()
-wire_path = "/home/dev/code/tmp/" + str(datetime.now().strftime("%Y-%m-%d %H-%M-%S")) + ".txt"
-cbp = cbpro.PublicClient()
-bnc = bnc(os.getenv("BINANCE_API_KEY"), os.getenv("BINANCE_API_SECRET"), tld = "us")
-cbc = ccxt.coinbase({'apiKey': os.getenv("COINBASE_API_KEY"), 'secret': os.getenv("COINBASE_API_SECRET")})
-pd.set_option('display.max_columns', None)
-
-# main
-valid = syncWallets()
-
-# candlestick dataframes
-for asset in valid:
-    try:    
-        # fetch kline data
-        klines = bnc.get_klines(symbol = asset + "USDT", interval = bnc.KLINE_INTERVAL_30MINUTE, limit = 1000)
-        df = pd.DataFrame(klines, columns = ['Open Time', 'Open', 'High', 'Low', 'Close', 'Volume', 'Close Time', 'Quote Asset Volume', 'Number of Trades', 'Taker Buy Base Asset Volume', 'Taker Buy Quote Asset Volume', 'Ignore'])
-        df = df.rename(columns = {'Close Time': 'ds', 'Number of Trades': 'Trades'})
-        df['ds'] = pd.to_datetime(df['ds'], unit = 'ms')
-        
-        # convert multiple columns to float64
-        df = df.astype({'Open': 'float64', 'High': 'float64', 'Low': 'float64', 'Close': 'float64', 'Volume': 'float64'})
-
-        # log of one plus percentage change is the target variable
-        df['y'] = np.log(1 + df['Close'].pct_change())
-             
-        # remove redundant columns
-        df = df[['ds', 'y', 'Open', 'High', 'Low', 'Close', 'Volume', 'Trades']]
-   
-        output(f"{asset}\n{df}\n{df.dtypes}\n\n")
-    except Exception as e:
-        output(f"{asset} Error {e}\n")
-
-# capture prices at time of trade
-trade_prices = dict()
-for asset in valid:
+# store prices at time of trade
+def capture_prices(cp_valid):
+    cp_trade_prices = dict()
     try:
-        price = getPrice(asset)
-        if price:
-            trade_prices[asset] = price
+        for asset in cp_valid:
+            current_asset = asset
+            price = get_price(asset)
+            if price:
+                cp_trade_prices[asset] = price
+        output(f"{cp_trade_prices}\n{len(cp_trade_prices)} Prices\n\n")
+        return cp_trade_prices
     except Exception as e:
-        output(f"{asset} Error {e}\n")
-output(f"{trade_prices}\n{len(trade_prices)} Prices\n\n")
+        output(f"capture_prices() {current_asset} Error {e}\n\n")
+        return None
+
+
+###########
+## BEGIN ##
+###########
+
+## VARS ##
+start_time = time.time()                    # track runtime 
+# output file
+wire_path = "/home/dev/code/tmp/" + str(datetime.now().strftime("%Y-%m-%d %H-%M-%S")) + ".txt"
+cbp = cbpro.PublicClient()                  # coinbase spot price
+# binance candlestick data
+bnc = bnc(os.getenv("BINANCE_API_KEY"), os.getenv("BINANCE_API_SECRET"), tld = "us")
+# coinbase check balance and trade
+cbc = ccxt.coinbase({'apiKey': os.getenv("COINBASE_API_KEY"), 'secret': os.getenv("COINBASE_API_SECRET")})
+pd.set_option('display.max_columns', None)  # pandas output formatting
+# pd.set_option('display.max_rows', None)
+
+## MAIN ##
+valid = sync_wallets()
+if not valid:
+    output(f"Stop at sync_wallets()\n\n")
+    sys.exit()
+
+data = get_data(valid)
+if not data:
+    output(f"Stop at get_data()\n\n")
+    sys.exit()
+
+trade_prices = capture_prices(valid)
+if not trade_prices:
+    output(f"Stop at capture_prices\n\n")
+    sys.exit()
 
 # calculate runtime
 end_time = time.time()
