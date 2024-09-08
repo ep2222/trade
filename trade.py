@@ -13,6 +13,7 @@ import ccxt
 import cbpro
 import pandas as pd
 import numpy as np
+import talib
 
 
 # write output to file
@@ -48,33 +49,44 @@ def sync_wallets():
         return None
 
 
-# get candlestick dataframes
-def get_data(gd_valid):
-    gd_data = dict()   # asset: df
-    try:
-        for asset in gd_valid:
-            current_asset = asset
+# get top ten highest average true range volatility
+def get_top_atr(gta_assets, granularity):
+    gd_atr = dict()     # asset: average relative atr
+    if granularity == 1:
+        interval_input = bnc.KLINE_INTERVAL_1MINUTE
+        interval_output = "One"
+    elif granularity == 3:
+        interval_input = bnc.KLINE_INTERVAL_3MINUTE
+        interval_output = "Three"
+    elif granularity == 5:
+        interval_input = bnc.KLINE_INTERVAL_5MINUTE
+        interval_output = "Five"
 
+    try:
+        for asset in gta_assets:
+            current_asset = asset
             # fetch kline data
-            klines = bnc.get_klines(symbol = asset + "USDT", interval = bnc.KLINE_INTERVAL_30MINUTE, limit = 1000)
+            klines = bnc.get_klines(symbol = asset + "USDT", interval = interval_input, limit = 1000)
             df = pd.DataFrame(klines, columns = ['Open Time', 'Open', 'High', 'Low', 'Close', 'Volume', 'Close Time', 'Quote Asset Volume', 'Number of Trades', 'Taker Buy Base Asset Volume', 'Taker Buy Quote Asset Volume', 'Ignore'])
-            df = df.rename(columns = {'Close Time': 'ds', 'Number of Trades': 'Trades'})
-            df['ds'] = pd.to_datetime(df['ds'], unit = 'ms')
+            df['Close Time'] = pd.to_datetime(df['Close Time'], unit = 'ms')
             
             # convert multiple ohlcv to float64
             df = df.astype({'Open': 'float64', 'High': 'float64', 'Low': 'float64', 'Close': 'float64', 'Volume': 'float64'})
-
-            # log of one plus percentage change is the target variable
-            df['y'] = np.log(1 + df['Close'].pct_change())
-                 
-            # remove redundant columns
-            df = df[['ds', 'y', 'Open', 'High', 'Low', 'Close', 'Volume', 'Trades']]
+            # relative atr normalizes prices
+            df['ATR'] = talib.ATR(df['High'], df['Low'], df['Close'])
+            df['relative_ATR'] = df['ATR'] / df['Close']
+            df = df.dropna()
             
-            gd_data[asset] = df
-            output(f"{asset}\n{df}\n{df.dtypes}\n\n")
-        return gd_data
+            # calculate average relative atr for the asset
+            avg_atr = df['relative_ATR'].mean()
+            gd_atr[asset] = avg_atr
+        
+        # return the top ten assets with the highest average relative atr
+        top_10 = dict(list(sorted(gd_atr.items(), key = lambda item: item[1], reverse = True)[:10]))
+        output(f"{top_10}\n10 {interval_output} Minute ATR\n\n")
+        return set(top_10.keys())
     except Exception as e:
-        output(f"get_data() {current_asset} Error {e}\n\n")
+        output(f"get_top_atr() {current_asset} Error {e}\n\n")
         return None
 
 
@@ -112,26 +124,33 @@ def capture_prices(cp_valid):
 start_time = time.time()                    # track runtime 
 # output file
 wire_path = "/home/dev/code/tmp/" + str(datetime.now().strftime("%Y-%m-%d %H-%M-%S")) + ".txt"
-cbp = cbpro.PublicClient()                  # coinbase spot price
+cbp = cbpro.PublicClient()                  # coinbase spot prices
 # binance candlestick data
 bnc = bnc(os.getenv("BINANCE_API_KEY"), os.getenv("BINANCE_API_SECRET"), tld = "us")
-# coinbase check balance and trade
+# coinbase assets
 cbc = ccxt.coinbase({'apiKey': os.getenv("COINBASE_API_KEY"), 'secret': os.getenv("COINBASE_API_SECRET")})
 pd.set_option('display.max_columns', None)  # pandas output formatting
 # pd.set_option('display.max_rows', None)
 
 ## MAIN ##
-valid = sync_wallets()
-if not valid:
+assets = sync_wallets()
+if not assets:
     output(f"Stop at sync_wallets()\n\n")
     sys.exit()
 
-data = get_data(valid)
-if not data:
-    output(f"Stop at get_data()\n\n")
+# select assets for modeling
+# top 30 most volatile average true range assets by three time difference granularities
+one_min = get_top_atr(assets, 1)                        # 1 minute
+th3_min = get_top_atr(assets - one_min, 3)              # 3 minutes
+fiv_min = get_top_atr(assets - one_min - th3_min, 5)    # 5 minutes
+modeling = one_min | th3_min | fiv_min
+output(f"{modeling}\n30 Modeling Assets\n\n")
+
+if not one_min or not th3_min or not fiv_min:
+    output(f"Stop at get_top_atr()\n\n")
     sys.exit()
 
-trade_prices = capture_prices(valid)
+trade_prices = capture_prices(assets)
 if not trade_prices:
     output(f"Stop at capture_prices\n\n")
     sys.exit()
